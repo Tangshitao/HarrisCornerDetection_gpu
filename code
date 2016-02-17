@@ -1,0 +1,139 @@
+#pragma once
+#ifdef __INTELLISENSE__
+void __syncthreads();
+void __threadfence();
+#endif
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <stdio.h>
+#include<iostream>
+#include<opencv.hpp>
+#include<algorithm>
+using namespace cv;
+__global__
+void cornerHarris(float *out,float *Ix,float *Iy,uchar *in,float k,float *max,float *min,int rows,int cols)
+{
+	int idx = blockDim.x*blockIdx.x + threadIdx.x,row=idx/cols,col=idx%cols;
+	if (row < rows)
+	{
+		float surround[3][3];
+		for (int i = -1; i < 2; i++)
+		{
+			for (int j = -1; j < 2; j++)
+			{
+				int x = row + i, y = col + j;
+				if (x <0 )
+				{
+					x += 2;
+				}
+				if (x >= rows)
+				{
+					x -= 2;
+				}
+				if (y < 0)
+				{
+					y += 2;
+				}
+				if (y >= cols)
+				{
+					y -= 2;
+				}
+				surround[i + 1][j + 1] = in[x*cols + y];
+			}
+		}
+
+		Ix[idx] = 2 * (surround[1][2] - surround[1][0]) + (surround[0][2] - surround[0][0]) + (surround[2][2] - surround[2][0]);
+		Iy[idx] = 2 * (surround[2][1] - surround[0][1]) + (surround[2][0] - surround[0][0]) + (surround[2][2] - surround[0][2]);
+		__threadfence();
+
+		float IxIx = 0, IyIy = 0, IxIy = 0;
+
+		for (int i = -1; i < 2; i++)
+		{
+			for (int j = -1; j < 2; j++)
+			{
+				int x = row + i, y = col + j;
+				if (x < 0)
+				{
+					x += 2;
+				}
+				if (x >= rows)
+				{
+					x -= 2;
+				}
+				if (y < 0)
+				{
+					y += 2;
+				}
+				if (y >= cols)
+				{
+					y -= 2;
+				}
+				float IxL = Ix[x*cols + y], IyL = Iy[x*cols + y];
+				IxIx += IxL*IxL;
+				IxIy += IxL*IyL;
+				IyIy += IyL*IyL;
+			}
+		}
+
+		float p=out[idx] = IxIx*IyIy - IxIy*IxIy - k*(IxIx + IyIy)*(IxIx + IyIy);
+		int u = idx + 1;
+	}
+}
+
+uchar view[1000005];
+float _max = -1e18, _min = 1e18;
+int main()
+{
+	Mat img = imread("1.jpg"),gray;
+	cvtColor(img, gray, CV_BGR2GRAY);
+
+	int rows=img.rows,cols=img.cols,size = img.rows*img.cols;
+	float *out,*Ix,*Iy,*max,*min;
+	uchar *normalizedOut, *in;
+
+	cudaMalloc(&normalizedOut, size*sizeof(uchar));
+	cudaMalloc(&in, size*sizeof(uchar));
+	cudaMalloc(&out, size*sizeof(float));
+	cudaMalloc(&Ix, size*sizeof(float));
+	cudaMalloc(&Iy, size*sizeof(float));
+	cudaMalloc(&max, sizeof(float));
+	cudaMalloc(&min, sizeof(float));
+
+	cudaMemcpy(in, gray.ptr<uchar>(0), size*sizeof(uchar),cudaMemcpyHostToDevice);
+	cudaMemcpy(max, &_max, sizeof(float), cudaMemcpyHostToDevice);
+	cudaMemcpy(min, &_min, sizeof(float), cudaMemcpyHostToDevice);
+
+	
+	cornerHarris << <415,512 >> >(out,Ix,Iy, in, 0.04, max, min,rows,cols);
+	
+
+	Mat dst(img.rows, img.cols,CV_32FC1),dst_norm;
+	
+	cudaMemcpy(dst.ptr<float>(0), out, size*sizeof(float), cudaMemcpyDeviceToHost);
+	
+
+	normalize(dst, dst_norm, 0, 255, NORM_MINMAX, CV_32FC1, Mat());
+
+	for (int i = 0; i < img.rows; i++)
+	{
+		for (int j = 0; j < img.cols; j++)
+		{
+			if (dst_norm.at<float>(i, j)>128)
+			{
+				circle(img, Point(j, i), 5, Scalar(0), 2, 8, 0);
+			}
+		}
+	}
+	
+	imshow("corner", img);
+	waitKey();
+
+	cudaFree(normalizedOut);
+	cudaFree(in);
+	cudaFree(out);
+	cudaFree(max);
+	cudaFree(min);
+
+	return 0;
+}
